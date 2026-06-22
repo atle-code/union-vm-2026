@@ -1,0 +1,18 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Korte API-stier -> Netlify-funksjoner
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# SPA-fallback: alle andre ruter til index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
