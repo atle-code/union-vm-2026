@@ -458,12 +458,12 @@ export default function App() {
     setWoldMode("loading");
     const finish = (cb) => { const wait = Math.max(0, 750 - (Date.now() - started)); setTimeout(cb, wait); };
     const open = ds.fixtures.filter((f) => !(ds.results && ds.results[f.id] != null));
-    if (!open.length) { finish(() => setWoldMode("nothing")); return; }
+    if (!open.length) { finish(() => setWoldMode("yeehaw")); return; }
     let j = null;
     try { j = await apiRefresh(); } catch (e) {}
     const add = {};
     if (j && j.results) { for (const k in j.results) { if (ds.results && ds.results[k] != null) continue; const v = j.results[k]; const hg = Number(v && v[0]), ag = Number(v && v[1]); if (Number.isFinite(hg) && Number.isFinite(ag)) add[k] = [hg, ag]; } }
-    if (Object.keys(add).length === 0) { finish(() => setWoldMode("nothing")); return; }
+    if (Object.keys(add).length === 0) { finish(() => setWoldMode("yeehaw")); return; }
     finish(() => { commit({ ...ds.results, ...add }, { lastSource: (j && j.lastSource) || "Live (offisielle kilder)" }, true); });
   };
   const importExcel = async () => { showToast("Leser Excel…"); try { const d = await importFromFiles(); await sset(KEY, d); setDs(d); setStatus("ready"); setOrigin("excel"); setImportErr(null); loadPhotos(d.participants); showToast("Tips hentet fra Excel ✓"); } catch (e) { setImportErr(String(e?.message || e)); showToast("Import feilet – se melding"); } };
