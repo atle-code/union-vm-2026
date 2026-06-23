@@ -449,7 +449,7 @@ export default function App() {
         const st = await apiGetState();                                   // delt tilstand fra backend
         let merged = (st && st.results) ? { ...base.results, ...st.results } : { ...base.results }; // baked = gulv
         let _lu = (st && st.lastUpdated) || base.lastUpdated, _ls = (st && st.lastSource) || base.lastSource;
-        try { const esp = await fetchEspnResults(base.fixtures); let _add = 0; for (const k in esp) { if (merged[k] == null) { merged[k] = esp[k]; _add++; } } if (_add) { _lu = Date.now(); _ls = "ESPN (live)"; apiSaveState({ results: merged, lastUpdated: _lu, lastSource: _ls }); } } catch (e) {}
+        try { const esp = await fetchEspnResults(base.fixtures); let _chg = 0; for (const k in esp) { const ov = merged[k]; if (!ov || ov[0] !== esp[k][0] || ov[1] !== esp[k][1]) { merged[k] = esp[k]; _chg++; } } if (_chg) { _lu = Date.now(); _ls = "ESPN (live)"; apiSaveState({ results: merged, lastUpdated: _lu, lastSource: _ls }); } } catch (e) {}
         const d = { ...base, results: merged, lastUpdated: _lu, lastSource: _ls };
         setDs(d); setStatus("ready"); setOrigin("seed"); loadPhotos(d.participants); return;
       }
@@ -466,14 +466,13 @@ export default function App() {
       if (woldMode) return;                         // ikke avbryt pågående animasjon
       let esp = null; try { esp = await fetchEspnResults(SEED.fixtures); } catch (e) {}
       const st = await apiGetState();
-      const incoming = { ...(st && st.results ? st.results : {}), ...(esp || {}) };
-      if (!Object.keys(incoming).length) return;
+      if (!st && !(esp && Object.keys(esp).length)) return;
       setDs((prev) => {
         if (!prev) return prev;
-        let changed = false;
-        for (const k in incoming) { if (prev.results[k] == null) { changed = true; break; } }
+        const _nr = { ...prev.results }; let changed = false;
+        if (esp) { for (const k in esp) { const ov = _nr[k]; if (!ov || ov[0] !== esp[k][0] || ov[1] !== esp[k][1]) { _nr[k] = esp[k]; changed = true; } } }
+        if (st && st.results) { for (const k in st.results) { if (_nr[k] == null) { _nr[k] = st.results[k]; changed = true; } } }
         if (!changed) return prev;
-        const _nr = { ...prev.results, ...incoming };
         const _lu = Date.now(), _ls = (esp && Object.keys(esp).length) ? "ESPN (live)" : (st && st.lastSource) || prev.lastSource;
         apiSaveState({ results: _nr, lastUpdated: _lu, lastSource: _ls });
         return { ...prev, results: _nr, lastUpdated: _lu, lastSource: _ls };
@@ -506,7 +505,7 @@ export default function App() {
     try { esp = await fetchEspnResults(ds.fixtures); } catch (e) {}
     try { j = await apiRefresh(); } catch (e) {}
     const add = {};
-    if (esp) { for (const k in esp) { if (ds.results && ds.results[k] != null) continue; add[k] = esp[k]; } }
+    if (esp) { for (const k in esp) { const ov = ds.results && ds.results[k]; if (!ov || ov[0] !== esp[k][0] || ov[1] !== esp[k][1]) add[k] = esp[k]; } }
     if (j && j.results) { for (const k in j.results) { if (ds.results && ds.results[k] != null) continue; if (add[k] != null) continue; const v = j.results[k]; const hg = Number(v && v[0]), ag = Number(v && v[1]); if (Number.isFinite(hg) && Number.isFinite(ag)) add[k] = [hg, ag]; } }
     if (Object.keys(add).length === 0) { finish(() => setWoldMode("yeehaw")); return; }
     finish(() => { commit({ ...ds.results, ...add }, { lastSource: (esp && Object.keys(esp).length) ? "ESPN (live)" : (j && j.lastSource) || "Live (offisielle kilder)" }); });
