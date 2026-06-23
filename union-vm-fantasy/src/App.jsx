@@ -167,6 +167,29 @@ async function sset(key, val) { try { localStorage.setItem(key, typeof val === "
 async function apiGetState() { try { const r = await fetch("/api/state", { cache: "no-store" }); if (!r.ok) return null; return await r.json(); } catch { return null; } }
 async function apiSaveState(state) { try { const r = await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ results: state.results, lastUpdated: state.lastUpdated, lastSource: state.lastSource }) }); return r.ok; } catch { return false; } }
 async function apiRefresh() { const r = await fetch("/api/refresh", { method: "POST" }); if (!r.ok) throw new Error("refresh " + r.status); return await r.json(); }
+// Live-resultater hentes også DIREKTE fra ESPN i nettleseren. Serveren blir tidvis blokkert av ESPN
+// (faller da tilbake på den tregere TheSportsDB), men ESPN sitt site.api har åpen CORS, så klient-
+// henting holder tabellen fersk uansett. Vi fyller bare hull (overskriver aldri eksisterende).
+const _ESPN_ALIAS = { unitedstates: "usa", congodr: "drcongo", turkiye: "turkey", korearepublic: "southkorea", republicofkorea: "southkorea", iriran: "iran", caboverde: "capeverde", cotedivoire: "ivorycoast" };
+const _nzTeam = (s) => { const b = (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, ""); return _ESPN_ALIAS[b] || b; };
+async function fetchEspnResults(fixtures) {
+  const byPair = {}; (fixtures || []).forEach((f) => { byPair[[_nzTeam(f.h), _nzTeam(f.a)].sort().join("|")] = f; });
+  const url = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720&_=" + Date.now();
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error("ESPN " + r.status);
+  const j = await r.json(); const out = {};
+  (j.events || []).forEach((e) => {
+    const c = (e.competitions || [])[0]; if (!c) return;
+    const stt = (c.status || {}).type || {}; if (!(stt.completed || stt.state === "post")) return;
+    const cs = c.competitors || []; if (cs.length < 2) return;
+    const nm = (x) => ((x.team || {}).displayName || (x.team || {}).shortDisplayName || (x.team || {}).name || "");
+    const ak = _nzTeam(nm(cs[0])), bk = _nzTeam(nm(cs[1])), as = parseInt(cs[0].score, 10), bs = parseInt(cs[1].score, 10);
+    if (!Number.isFinite(as) || !Number.isFinite(bs)) return;
+    const fx = byPair[[ak, bk].sort().join("|")]; if (!fx) return;
+    out[fx.id] = _nzTeam(fx.h) === ak ? [as, bs] : [bs, as];
+  });
+  return out;
+}
 
 /* ---------- format ---------- */
 const fmtDate = (iso) => iso ? new Date(iso + "T12:00:00").toLocaleDateString("no-NO", { day: "2-digit", month: "short" }) : "—";
@@ -424,8 +447,10 @@ export default function App() {
       if (SEED && SEED.participants?.length) {
         const base = hydrate(SEED, "seed");
         const st = await apiGetState();                                   // delt tilstand fra backend
-        const merged = (st && st.results) ? { ...base.results, ...st.results } : base.results; // baked = gulv
-        const d = { ...base, results: merged, lastUpdated: (st && st.lastUpdated) || base.lastUpdated, lastSource: (st && st.lastSource) || base.lastSource };
+        let merged = (st && st.results) ? { ...base.results, ...st.results } : { ...base.results }; // baked = gulv
+        let _lu = (st && st.lastUpdated) || base.lastUpdated, _ls = (st && st.lastSource) || base.lastSource;
+        try { const esp = await fetchEspnResults(base.fixtures); let _add = 0; for (const k in esp) { if (merged[k] == null) { merged[k] = esp[k]; _add++; } } if (_add) { _lu = Date.now(); _ls = "ESPN (live)"; apiSaveState({ results: merged, lastUpdated: _lu, lastSource: _ls }); } } catch (e) {}
+        const d = { ...base, results: merged, lastUpdated: _lu, lastSource: _ls };
         setDs(d); setStatus("ready"); setOrigin("seed"); loadPhotos(d.participants); return;
       }
       const raw = await sget(KEY);
@@ -439,14 +464,19 @@ export default function App() {
   useEffect(() => {
     const t = setInterval(async () => {
       if (woldMode) return;                         // ikke avbryt pågående animasjon
+      let esp = null; try { esp = await fetchEspnResults(SEED.fixtures); } catch (e) {}
       const st = await apiGetState();
-      if (!st || !st.results) return;
+      const incoming = { ...(st && st.results ? st.results : {}), ...(esp || {}) };
+      if (!Object.keys(incoming).length) return;
       setDs((prev) => {
         if (!prev) return prev;
         let changed = false;
-        for (const k in st.results) { if (prev.results[k] == null) { changed = true; break; } }
+        for (const k in incoming) { if (prev.results[k] == null) { changed = true; break; } }
         if (!changed) return prev;
-        return { ...prev, results: { ...prev.results, ...st.results }, lastUpdated: st.lastUpdated || prev.lastUpdated, lastSource: st.lastSource || prev.lastSource };
+        const _nr = { ...prev.results, ...incoming };
+        const _lu = Date.now(), _ls = (esp && Object.keys(esp).length) ? "ESPN (live)" : (st && st.lastSource) || prev.lastSource;
+        apiSaveState({ results: _nr, lastUpdated: _lu, lastSource: _ls });
+        return { ...prev, results: _nr, lastUpdated: _lu, lastSource: _ls };
       });
     }, 60000);
     return () => clearInterval(t);
@@ -472,12 +502,14 @@ export default function App() {
     const finish = (cb) => { const wait = Math.max(0, 750 - (Date.now() - started)); setTimeout(cb, wait); };
     const open = ds.fixtures.filter((f) => !(ds.results && ds.results[f.id] != null));
     if (!open.length) { finish(() => setWoldMode("yeehaw")); return; }
-    let j = null;
+    let j = null, esp = null;
+    try { esp = await fetchEspnResults(ds.fixtures); } catch (e) {}
     try { j = await apiRefresh(); } catch (e) {}
     const add = {};
-    if (j && j.results) { for (const k in j.results) { if (ds.results && ds.results[k] != null) continue; const v = j.results[k]; const hg = Number(v && v[0]), ag = Number(v && v[1]); if (Number.isFinite(hg) && Number.isFinite(ag)) add[k] = [hg, ag]; } }
+    if (esp) { for (const k in esp) { if (ds.results && ds.results[k] != null) continue; add[k] = esp[k]; } }
+    if (j && j.results) { for (const k in j.results) { if (ds.results && ds.results[k] != null) continue; if (add[k] != null) continue; const v = j.results[k]; const hg = Number(v && v[0]), ag = Number(v && v[1]); if (Number.isFinite(hg) && Number.isFinite(ag)) add[k] = [hg, ag]; } }
     if (Object.keys(add).length === 0) { finish(() => setWoldMode("yeehaw")); return; }
-    finish(() => { commit({ ...ds.results, ...add }, { lastSource: (j && j.lastSource) || "Live (offisielle kilder)" }, true); });
+    finish(() => { commit({ ...ds.results, ...add }, { lastSource: (esp && Object.keys(esp).length) ? "ESPN (live)" : (j && j.lastSource) || "Live (offisielle kilder)" }); });
   };
   const importExcel = async () => { showToast("Leser Excel…"); try { const d = await importFromFiles(); await sset(KEY, d); setDs(d); setStatus("ready"); setOrigin("excel"); setImportErr(null); loadPhotos(d.participants); showToast("Tips hentet fra Excel ✓"); } catch (e) { setImportErr(String(e?.message || e)); showToast("Import feilet – se melding"); } };
   const savePhoto = async (id, input, silent) => { try { const b64 = typeof input === "string" ? input : await compressImage(input); await sset(`vmf:photo:${id}`, b64); setPhotos((p) => ({ ...p, [id]: b64 })); if (!silent) showToast("Bilde lagret ✓"); } catch { if (!silent) showToast("Kunne ikke lese bildet"); } };
