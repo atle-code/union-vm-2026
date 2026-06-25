@@ -132,7 +132,7 @@ function buildDemo() {
 /* ---------- poengmotor ---------- */
 function catOf(pr, res) { if (!pr || !res) return "none"; if (pr[0] === res[0] && pr[1] === res[1]) return "exact"; if (Math.sign(pr[0] - pr[1]) === Math.sign(res[0] - res[1])) return "outcome"; return "miss"; }
 const ptsOf = (cat) => (cat === "exact" ? GROUP_OUTCOME + GROUP_EXACT_BONUS : cat === "outcome" ? GROUP_OUTCOME : 0);
-function computeAll(results, fixtures, participants) {
+function computeAll(results, fixtures, participants, advanced) {
   const played = fixtures.filter((f) => results[f.id]); const remaining = fixtures.filter((f) => !results[f.id]);
   const rows = participants.map((p) => {
     let pts = 0, exact = 0, hits = 0, miss = 0, goals = 0, bold = 0, predicted = 0; const per = {};
@@ -141,7 +141,7 @@ function computeAll(results, fixtures, participants) {
       const res = results[f.id]; const cat = catOf(pr, res); per[f.id] = cat;
       if (res && pr) { pts += ptsOf(cat); if (cat === "exact") { exact++; hits++; } else if (cat === "outcome") hits++; else miss++; }
     });
-    const ko = p.sluttspill || 0, bonus = p.bonus || 0, adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
+    const ko = koPointsFor(p, advanced), bonus = p.bonus || 0, adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
     const playedPred = played.filter((f) => p.preds[f.id]).sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.idx - b.idx).slice(-6);
     const form = playedPred.map((f) => per[f.id]); const settled = hits + miss; const hitRate = settled ? Math.round((100 * hits) / settled) : 0;
     const maxRemaining = remaining.filter((f) => p.preds[f.id]).length * MAXPER;
@@ -172,6 +172,38 @@ async function apiRefresh() { const r = await fetch("/api/refresh", { method: "P
 // henting holder tabellen fersk uansett. Vi fyller bare hull (overskriver aldri eksisterende).
 const _ESPN_ALIAS = { unitedstates: "usa", congodr: "drcongo", turkiye: "turkey", korearepublic: "southkorea", republicofkorea: "southkorea", iriran: "iran", caboverde: "capeverde", cotedivoire: "ivorycoast" };
 const _nzTeam = (s) => { const b = (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, ""); return _ESPN_ALIAS[b] || b; };
+const KO_PTS = { r32: 2, r16: 5, qf: 8, sf: 12, final: 18 };
+function koPointsFor(p, advanced) {
+  if (!advanced) return p.sluttspill || 0;
+  const ko = p.ko || {}; let s = 0;
+  for (const rd in KO_PTS) { const aset = advanced[rd] || []; (ko[rd] || []).forEach((tm) => { if (aset.includes(_nzTeam(tm))) s += KO_PTS[rd]; }); }
+  const win = (ko.winner && ko.winner[0]) || p.winner || null;
+  if (win && (advanced.winner || []).includes(_nzTeam(win))) s += 25;
+  return s;
+}
+// Avansement (hvilke lag har naadd hver runde) hentes LIVE fra ESPN, slik at sluttspillpoeng beregnes
+// automatisk: R32 fra offisielle gruppe-tabeller (note "Advance to Round of 32" - haandterer beste
+// 3.-plasser korrekt), R16..Finale fra sluttspill-kampene etter hvert som de spilles.
+async function fetchAdvancement() {
+  const r32 = new Set(), r16 = new Set(), qf = new Set(), sf = new Set(), fin = new Set(), win = new Set();
+  try {
+    const r = await fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings?season=2026&_=" + Date.now(), { cache: "no-store" });
+    const j = await r.json();
+    (j.children || []).forEach((g) => (((g.standings || {}).entries) || []).forEach((en) => { const d = ((en.note || {}).description) || ""; if (/Advance/i.test(d)) r32.add(_nzTeam((en.team || {}).displayName)); }));
+  } catch (e) {}
+  try {
+    const r = await fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720&_=" + Date.now(), { cache: "no-store" });
+    const j = await r.json();
+    const real = (nm) => !!nm && !/Winner|Place|Round of|Group [A-L]|TBD|Third/i.test(nm);
+    const nm = (cp) => ((cp.team || {}).displayName || "");
+    const ko = (j.events || []).filter((e) => (e.season || {}).type === 13801).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+    ko.forEach((e, idx) => { const c = (e.competitions || [])[0]; if (!c) return; const cs = c.competitors || []; if (cs.length < 2) return; const bucket = idx < 16 ? r32 : idx < 24 ? r16 : idx < 28 ? qf : idx < 30 ? sf : null; if (!bucket) return; cs.forEach((cp) => { if (real(nm(cp))) bucket.add(_nzTeam(nm(cp))); }); });
+    const f = ko[31];
+    if (f) { const c = (f.competitions || [])[0]; const cs = (c && c.competitors) || []; if (cs.length === 2 && real(nm(cs[0])) && real(nm(cs[1]))) { fin.add(_nzTeam(nm(cs[0]))); fin.add(_nzTeam(nm(cs[1]))); const st = (c.status || {}).type || {}; if (st.completed || st.state === "post") { const w = cs.find((x) => x.winner === true); if (w) win.add(_nzTeam(nm(w))); } } }
+  } catch (e) {}
+  win.forEach((x) => fin.add(x)); fin.forEach((x) => sf.add(x)); sf.forEach((x) => qf.add(x)); qf.forEach((x) => r16.add(x)); r16.forEach((x) => r32.add(x));
+  return { r32: [...r32], r16: [...r16], qf: [...qf], sf: [...sf], final: [...fin], winner: [...win] };
+}
 async function fetchEspnResults(fixtures) {
   const byPair = {}; (fixtures || []).forEach((f) => { byPair[[_nzTeam(f.h), _nzTeam(f.a)].sort().join("|")] = f; });
   const url = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720&_=" + Date.now();
@@ -450,7 +482,8 @@ export default function App() {
         let merged = (st && st.results) ? { ...base.results, ...st.results } : { ...base.results }; // baked = gulv
         let _lu = (st && st.lastUpdated) || base.lastUpdated, _ls = (st && st.lastSource) || base.lastSource;
         try { const esp = await fetchEspnResults(base.fixtures); let _chg = 0; for (const k in esp) { const ov = merged[k]; if (!ov || ov[0] !== esp[k][0] || ov[1] !== esp[k][1]) { merged[k] = esp[k]; _chg++; } } if (_chg) { _lu = Date.now(); _ls = "ESPN (live)"; apiSaveState({ results: merged, lastUpdated: _lu, lastSource: _ls }); } } catch (e) {}
-        const d = { ...base, results: merged, lastUpdated: _lu, lastSource: _ls };
+        let _adv0 = null; try { _adv0 = await fetchAdvancement(); } catch (e) {}
+        const d = { ...base, results: merged, lastUpdated: _lu, lastSource: _ls, advanced: _adv0 };
         setDs(d); setStatus("ready"); setOrigin("seed"); loadPhotos(d.participants); return;
       }
       const raw = await sget(KEY);
@@ -465,23 +498,26 @@ export default function App() {
     const t = setInterval(async () => {
       if (woldMode) return;                         // ikke avbryt pågående animasjon
       let esp = null; try { esp = await fetchEspnResults(SEED.fixtures); } catch (e) {}
+      let _advP = null; try { _advP = await fetchAdvancement(); } catch (e) {}
       const st = await apiGetState();
-      if (!st && !(esp && Object.keys(esp).length)) return;
+      if (!st && !(esp && Object.keys(esp).length) && !_advP) return;
       setDs((prev) => {
         if (!prev) return prev;
         const _nr = { ...prev.results }; let changed = false;
         if (esp) { for (const k in esp) { const ov = _nr[k]; if (!ov || ov[0] !== esp[k][0] || ov[1] !== esp[k][1]) { _nr[k] = esp[k]; changed = true; } } }
         if (st && st.results) { for (const k in st.results) { if (_nr[k] == null) { _nr[k] = st.results[k]; changed = true; } } }
+        let _advNext = prev.advanced;
+        if (_advP && JSON.stringify(_advP) !== JSON.stringify(prev.advanced || null)) { _advNext = _advP; changed = true; }
         if (!changed) return prev;
         const _lu = Date.now(), _ls = (esp && Object.keys(esp).length) ? "ESPN (live)" : (st && st.lastSource) || prev.lastSource;
         apiSaveState({ results: _nr, lastUpdated: _lu, lastSource: _ls });
-        return { ...prev, results: _nr, lastUpdated: _lu, lastSource: _ls };
+        return { ...prev, results: _nr, advanced: _advNext, lastUpdated: _lu, lastSource: _ls };
       });
     }, 60000);
     return () => clearInterval(t);
   }, [woldMode]);
 
-  const data = useMemo(() => (ds ? computeAll(ds.results, ds.fixtures, ds.participants) : null), [ds]);
+  const data = useMemo(() => (ds ? computeAll(ds.results, ds.fixtures, ds.participants, ds.advanced) : null), [ds]);
   const prevRank = useMemo(() => { const m = {}; (ds?.prevRanking || []).forEach((id, i) => (m[id] = i + 1)); return m; }, [ds]);
   const accept = useMemo(() => { if (!data || !ds || origin === "demo" || !ds.poengtavle || !Object.keys(ds.poengtavle).length) return null; let ok = 0, total = 0; const diffs = []; data.rows.forEach((r) => { const exp = ds.poengtavle[r.p.id]; if (exp == null) return; total++; if (exp === r.total) ok++; else diffs.push({ name: r.p.name, got: r.total, exp }); }); return { ok, total, diffs }; }, [data, ds, origin]);
 
@@ -490,7 +526,7 @@ export default function App() {
   const beep = () => { if (!soundOn) return; try { const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(), g = c.createGain(); o.connect(g); g.connect(c.destination); o.type = "triangle"; o.frequency.value = 660; g.gain.setValueAtTime(0.001, c.currentTime); g.gain.exponentialRampToValueAtTime(0.18, c.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + 0.4); o.start(); o.stop(c.currentTime + 0.42); } catch {} };
 
   const commit = (newResults, meta = {}, skipSave = false) => {
-    setDs((prev) => { const oldAll = computeAll(prev.results, prev.fixtures, prev.participants); const newAll = computeAll(newResults, prev.fixtures, prev.participants); const next = { ...prev, results: newResults, lastUpdated: Date.now(), ...meta, prevRanking: oldAll.rows.map((r) => r.p.id), history: [...prev.history, { t: Date.now(), pts: Object.fromEntries(newAll.rows.map((r) => [r.p.id, r.pts])) }].slice(-50) }; if (origin !== "demo" && !skipSave) apiSaveState(next); return next; });
+    setDs((prev) => { const oldAll = computeAll(prev.results, prev.fixtures, prev.participants, prev.advanced); const newAll = computeAll(newResults, prev.fixtures, prev.participants, prev.advanced); const next = { ...prev, results: newResults, lastUpdated: Date.now(), ...meta, prevRanking: oldAll.rows.map((r) => r.p.id), history: [...prev.history, { t: Date.now(), pts: Object.fromEntries(newAll.rows.map((r) => [r.p.id, r.pts])) }].slice(-50) }; if (origin !== "demo" && !skipSave) apiSaveState(next); return next; });
     fireConfetti(); beep(); setWoldMode("yeehaw"); showToast("Resultater lagret – poeng regnet om ⚽");
   };
   const matchFixture = (item) => { const fx = ds.fixtures.find((f) => pairKey(f.h, f.a) === pairKey(item.hjemmelag, item.bortelag)) || null; if (!fx) return { fixtureId: null, h: item.hjemmemaal, a: item.bortemaal }; const swap = canon(fx.h) !== canon(item.hjemmelag); return { fixtureId: fx.id, h: swap ? item.bortemaal : item.hjemmemaal, a: swap ? item.hjemmemaal : item.bortemaal }; };
@@ -609,9 +645,9 @@ function DeltakereView({ data, ds, photos, setOpenP }) {
 }
 function Picker({ val, set, rows, photos }) { const r = rows.find((x) => x.p.id === val); return <div className="text-center">{r && <Avatar id={r.p.id} name={r.p.name} photo={photos[r.p.id]} size={48} rank={r.rank} />}<select value={val} onChange={(e) => set(e.target.value)} className="mt-2 w-full text-sm font-semibold bg-transparent border hair rounded-lg py-1.5 px-2">{rows.map((x) => <option key={x.p.id} value={x.p.id}>{x.p.name}</option>)}</select></div>; }
 function Cat({ label, v, max }) { const pct = Math.min(100, Math.round(100 * (v || 0) / Math.max(1, max))); return <div className="card rounded-lg p-2 border hair text-center"><div className="text-[10px] muted truncate">{label}</div><div className="font-extrabold text-emerald-500 leading-tight">{v || 0}</div><div className="text-[9px] muted">av {max}</div><div className="h-1 mt-1 rounded-full trackbg overflow-hidden"><div className="h-full bg-emerald-500" style={{ width: pct + "%" }} /></div></div>; }
-function KoRow({ label, pts, teams }) { return <div className="flex items-start gap-2 text-xs py-1 border-b hair last:border-0"><span className="w-24 shrink-0 muted">{label} <span className="text-[10px]">({pts}p)</span></span><div className="flex-1 flex flex-wrap gap-1">{teams && teams.length ? teams.map((t, i) => <span key={i} className="px-1.5 py-0.5 rounded softbg text-[11px] font-medium">{t}</span>) : <span className="muted">—</span>}</div></div>; }
+function KoRow({ label, pts, teams, advSet }) { const A = advSet || []; return <div className="flex items-start gap-2 text-xs py-1 border-b hair last:border-0"><span className="w-24 shrink-0 muted">{label} <span className="text-[10px]">({pts}p)</span></span><div className="flex-1 flex flex-wrap gap-1">{teams && teams.length ? teams.map((t, i) => { const ok = A.includes(_nzTeam(t)); return <span key={i} className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${ok ? "bg-emerald-500 text-white" : "softbg"}`}>{t}{ok ? " ✓" : ""}</span>; }) : <span className="muted">—</span>}</div></div>; }
 function DeltakerDetalj({ row, ds, photos }) {
-  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null;
+  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null; const adv = ds.advanced || {};
   const spark = (ds.history || []).map((h, i) => ({ x: i, y: h.pts[p.id] ?? 0 }));
   const chron = (a, b) => koTs(a) - koTs(b) || a.idx - b.idx;
   const played = ds.fixtures.filter((f) => ds.results[f.id]).sort(chron);
@@ -623,14 +659,14 @@ function DeltakerDetalj({ row, ds, photos }) {
     <div className="flex items-center gap-3 mb-4"><Avatar id={p.id} name={p.name} photo={photos[p.id]} size={56} rank={row.rank} /><div><div className="text-2xl display">{row.total} <span className="text-sm muted font-normal">poeng</span></div><div className="text-xs muted">#{row.rank} · {row.exact} eksakte · maks {row.theoryMax} av {TOTAL_MAX}</div></div></div>
     <div className="grid grid-cols-3 gap-2 mb-4"><Cat label="Gruppespill" v={row.group + (row.adjust || 0)} max={GROUP_MAX} /><Cat label="Sluttspill" v={row.ko} max={KO_MAX} /><Cat label="Bonus" v={row.bonus} max={BONUS_MAX} /></div>
     {spark.length > 1 && <div className="h-20 mb-4"><ResponsiveContainer width="100%" height="100%"><LineChart data={spark}><Line type="monotone" dataKey="y" stroke="#22c55e" strokeWidth={2.5} dot={false} /><Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} formatter={(v) => [v + " p", "poeng"]} labelFormatter={() => ""} /></LineChart></ResponsiveContainer></div>}
-    <div className="text-xs font-semibold muted mb-2 flex items-center gap-1.5"><Crown size={13} className="text-amber-400" /> Sluttspill- og bonustips (teller når sluttspillet spilles)</div>
+    <div className="text-xs font-semibold muted mb-2 flex items-center gap-1.5"><Crown size={13} className="text-amber-400" /> Sluttspill- og bonustips (R32 teller live etter hvert som lag avanserer)</div>
     <div className="card rounded-xl p-3 border hair mb-4">
-      <div className="flex items-center gap-2 mb-2 pb-2 border-b hair"><Trophy size={16} className="text-amber-400" /><span className="text-sm">Vinnertips:</span><span className="font-extrabold">{winner || "—"}</span><span className="text-[10px] muted ml-auto">25 p</span></div>
-      <KoRow label="Finale" pts={18} teams={(ko.final || []).slice(0, 2)} />
-      <KoRow label="Semifinale" pts={12} teams={(ko.sf || []).slice(0, 4)} />
-      <KoRow label="Kvartfinale" pts={8} teams={(ko.qf || []).slice(0, 8)} />
-      <KoRow label="16-delsfinale" pts={5} teams={(ko.r16 || []).slice(0, 16)} />
-      <KoRow label="32-delsfinale" pts={2} teams={(ko.r32 || []).slice(0, 32)} />
+      <div className="flex items-center gap-2 mb-2 pb-2 border-b hair"><Trophy size={16} className="text-amber-400" /><span className="text-sm">Vinnertips:</span><span className={`font-extrabold ${winner && (adv.winner || []).includes(_nzTeam(winner)) ? "text-emerald-500" : ""}`}>{winner || "—"}{winner && (adv.winner || []).includes(_nzTeam(winner)) ? " ✓" : ""}</span><span className="text-[10px] muted ml-auto">25 p</span></div>
+      <KoRow label="Finale" pts={18} teams={(ko.final || []).slice(0, 2)} advSet={adv.final} />
+      <KoRow label="Semifinale" pts={12} teams={(ko.sf || []).slice(0, 4)} advSet={adv.sf} />
+      <KoRow label="Kvartfinale" pts={8} teams={(ko.qf || []).slice(0, 8)} advSet={adv.qf} />
+      <KoRow label="16-delsfinale" pts={5} teams={(ko.r16 || []).slice(0, 16)} advSet={adv.r16} />
+      <KoRow label="32-delsfinale" pts={2} teams={(ko.r32 || []).slice(0, 32)} advSet={adv.r32} />
       <div className="border-t hair mt-2 pt-2"><div className="text-[11px] font-semibold muted mb-0.5">Bonus (maks {BONUS_MAX}) – avgjøres mot slutten</div><div className="text-[11px] muted">Golden Boot 20 · Golden Ball 20 · flest mål 10 · flest baklengs 10 · flest gule kort 10</div></div>
     </div>
     <div className="text-xs font-semibold muted mb-1 flex items-center gap-1.5"><Lock size={12} /> Kamptips ({row.predicted}) – tips, resultat og poeng</div>
