@@ -189,7 +189,7 @@ async function fetchAdvancement() {
   try {
     const r = await fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings?season=2026&_=" + Date.now(), { cache: "no-store" });
     const j = await r.json();
-    (j.children || []).forEach((g) => (((g.standings || {}).entries) || []).forEach((en) => { const d = ((en.note || {}).description) || ""; if (/Advance/i.test(d)) r32.add(_nzTeam((en.team || {}).displayName)); }));
+    (j.children || []).forEach((g) => (((g.standings || {}).entries) || []).forEach((en) => { const d = ((en.note || {}).description) || ""; if (/Advance to/i.test(d)) r32.add(_nzTeam((en.team || {}).displayName)); }));
   } catch (e) {}
   try {
     const r = await fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720&_=" + Date.now(), { cache: "no-store" });
