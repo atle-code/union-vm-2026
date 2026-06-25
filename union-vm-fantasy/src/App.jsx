@@ -134,6 +134,7 @@ function catOf(pr, res) { if (!pr || !res) return "none"; if (pr[0] === res[0] &
 const ptsOf = (cat) => (cat === "exact" ? GROUP_OUTCOME + GROUP_EXACT_BONUS : cat === "outcome" ? GROUP_OUTCOME : 0);
 function computeAll(results, fixtures, participants, advanced) {
   const played = fixtures.filter((f) => results[f.id]); const remaining = fixtures.filter((f) => !results[f.id]);
+  const _adv = buildAdvanced(results, fixtures, advanced);
   const rows = participants.map((p) => {
     let pts = 0, exact = 0, hits = 0, miss = 0, goals = 0, bold = 0, predicted = 0; const per = {};
     fixtures.forEach((f) => {
@@ -141,7 +142,7 @@ function computeAll(results, fixtures, participants, advanced) {
       const res = results[f.id]; const cat = catOf(pr, res); per[f.id] = cat;
       if (res && pr) { pts += ptsOf(cat); if (cat === "exact") { exact++; hits++; } else if (cat === "outcome") hits++; else miss++; }
     });
-    const ko = koPointsFor(p, advanced), bonus = p.bonus || 0, adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
+    const ko = koPointsFor(p, _adv), bonus = p.bonus || 0, adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
     const playedPred = played.filter((f) => p.preds[f.id]).sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.idx - b.idx).slice(-6);
     const form = playedPred.map((f) => per[f.id]); const settled = hits + miss; const hitRate = settled ? Math.round((100 * hits) / settled) : 0;
     const maxRemaining = remaining.filter((f) => p.preds[f.id]).length * MAXPER;
@@ -173,6 +174,48 @@ async function apiRefresh() { const r = await fetch("/api/refresh", { method: "P
 const _ESPN_ALIAS = { unitedstates: "usa", congodr: "drcongo", turkiye: "turkey", korearepublic: "southkorea", republicofkorea: "southkorea", iriran: "iran", caboverde: "capeverde", cotedivoire: "ivorycoast" };
 const _nzTeam = (s) => { const b = (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, ""); return _ESPN_ALIAS[b] || b; };
 const KO_PTS = { r32: 2, r16: 5, qf: 8, sf: 12, final: 18 };
+// Et lag teller som "avansert til R32" KUN naar det er MATEMATISK garantert videre.
+// Ferdigspilte grupper: faktisk topp-2 (poeng -> maaldiff -> maal). Uferdige grupper: et lag er garantert
+// topp-2 hvis det i ALLE gjenstaaende resultatkombinasjoner ikke kan havne lavere enn 2. plass (poeng).
+// Beste 3.-plasser regnes foerst som garantert naar HELE gruppespillet er ferdig.
+function clinchedR32(results, fixtures) {
+  const grp = {};
+  (fixtures || []).forEach((f) => { (grp[f.g] = grp[f.g] || { teams: [], fx: [] }); const G = grp[f.g]; if (!G.teams.includes(f.h)) G.teams.push(f.h); if (!G.teams.includes(f.a)) G.teams.push(f.a); G.fx.push(f); });
+  const out = new Set(); const thirds = []; let allComplete = true;
+  for (const g in grp) {
+    const G = grp[g]; const teams = G.teams; const st = {}; teams.forEach((tm) => (st[tm] = { pts: 0, gd: 0, gf: 0 })); const rem = [];
+    G.fx.forEach((f) => { const r = results[f.id]; if (r) { const h = r[0], a = r[1]; st[f.h].gf += h; st[f.h].gd += h - a; st[f.a].gf += a; st[f.a].gd += a - h; if (h > a) st[f.h].pts += 3; else if (h < a) st[f.a].pts += 3; else { st[f.h].pts += 1; st[f.a].pts += 1; } } else rem.push(f); });
+    if (rem.length === 0) {
+      const rank = teams.slice().sort((x, y) => st[y].pts - st[x].pts || st[y].gd - st[x].gd || st[y].gf - st[x].gf);
+      out.add(_nzTeam(rank[0])); out.add(_nzTeam(rank[1]));
+      if (rank[2]) thirds.push({ t: rank[2], pts: st[rank[2]].pts, gd: st[rank[2]].gd, gf: st[rank[2]].gf });
+    } else {
+      allComplete = false;
+      let combos = [[]];
+      for (let m = 0; m < rem.length; m++) { const next = []; combos.forEach((c) => { for (let o = 0; o < 3; o++) next.push(c.concat(o)); }); combos = next; }
+      teams.forEach((tm) => {
+        let safe = true;
+        for (let ci = 0; ci < combos.length && safe; ci++) {
+          const combo = combos[ci]; const pts = {}; teams.forEach((x) => (pts[x] = st[x].pts));
+          rem.forEach((f, k) => { const o = combo[k]; if (o === 0) pts[f.h] += 3; else if (o === 2) pts[f.a] += 3; else { pts[f.h] += 1; pts[f.a] += 1; } });
+          let ab = 0, eq = 0; teams.forEach((x) => { if (x === tm) return; if (pts[x] > pts[tm]) ab++; else if (pts[x] === pts[tm]) eq++; });
+          if (ab + eq > 1) safe = false;
+        }
+        if (safe) out.add(_nzTeam(tm));
+      });
+    }
+  }
+  if (allComplete && thirds.length) { thirds.sort((x, y) => y.pts - x.pts || y.gd - x.gd || y.gf - x.gf); thirds.slice(0, 8).forEach((x) => out.add(_nzTeam(x.t))); }
+  return out;
+}
+// Samlet avansement: R32 fra garantert-klinsj (lokalt), R16+ fra ESPN sluttspill-kamper. Nesting sikres oppover.
+function buildAdvanced(results, fixtures, espnAdv) {
+  espnAdv = espnAdv || {};
+  const r32 = clinchedR32(results, fixtures); (espnAdv.r32 || []).forEach((tm) => r32.add(tm));
+  const r16 = new Set(espnAdv.r16 || []), qf = new Set(espnAdv.qf || []), sf = new Set(espnAdv.sf || []), fin = new Set(espnAdv.final || []), win = new Set(espnAdv.winner || []);
+  win.forEach((tm) => fin.add(tm)); fin.forEach((tm) => sf.add(tm)); sf.forEach((tm) => qf.add(tm)); qf.forEach((tm) => r16.add(tm)); r16.forEach((tm) => r32.add(tm));
+  return { r32: [...r32], r16: [...r16], qf: [...qf], sf: [...sf], final: [...fin], winner: [...win] };
+}
 function koPointsFor(p, advanced) {
   if (!advanced) return p.sluttspill || 0;
   const ko = p.ko || {}; let s = 0;
@@ -186,11 +229,6 @@ function koPointsFor(p, advanced) {
 // 3.-plasser korrekt), R16..Finale fra sluttspill-kampene etter hvert som de spilles.
 async function fetchAdvancement() {
   const r32 = new Set(), r16 = new Set(), qf = new Set(), sf = new Set(), fin = new Set(), win = new Set();
-  try {
-    const r = await fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings?season=2026&_=" + Date.now(), { cache: "no-store" });
-    const j = await r.json();
-    (j.children || []).forEach((g) => (((g.standings || {}).entries) || []).forEach((en) => { const d = ((en.note || {}).description) || ""; if (/Advance to/i.test(d)) r32.add(_nzTeam((en.team || {}).displayName)); }));
-  } catch (e) {}
   try {
     const r = await fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720&_=" + Date.now(), { cache: "no-store" });
     const j = await r.json();
@@ -647,7 +685,7 @@ function Picker({ val, set, rows, photos }) { const r = rows.find((x) => x.p.id 
 function Cat({ label, v, max }) { const pct = Math.min(100, Math.round(100 * (v || 0) / Math.max(1, max))); return <div className="card rounded-lg p-2 border hair text-center"><div className="text-[10px] muted truncate">{label}</div><div className="font-extrabold text-emerald-500 leading-tight">{v || 0}</div><div className="text-[9px] muted">av {max}</div><div className="h-1 mt-1 rounded-full trackbg overflow-hidden"><div className="h-full bg-emerald-500" style={{ width: pct + "%" }} /></div></div>; }
 function KoRow({ label, pts, teams, advSet }) { const A = advSet || []; return <div className="flex items-start gap-2 text-xs py-1 border-b hair last:border-0"><span className="w-24 shrink-0 muted">{label} <span className="text-[10px]">({pts}p)</span></span><div className="flex-1 flex flex-wrap gap-1">{teams && teams.length ? teams.map((t, i) => { const ok = A.includes(_nzTeam(t)); return <span key={i} className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${ok ? "bg-emerald-500 text-white" : "softbg"}`}>{t}{ok ? " ✓" : ""}</span>; }) : <span className="muted">—</span>}</div></div>; }
 function DeltakerDetalj({ row, ds, photos }) {
-  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null; const adv = ds.advanced || {};
+  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null; const adv = buildAdvanced(ds.results, ds.fixtures, ds.advanced);
   const spark = (ds.history || []).map((h, i) => ({ x: i, y: h.pts[p.id] ?? 0 }));
   const chron = (a, b) => koTs(a) - koTs(b) || a.idx - b.idx;
   const played = ds.fixtures.filter((f) => ds.results[f.id]).sort(chron);
