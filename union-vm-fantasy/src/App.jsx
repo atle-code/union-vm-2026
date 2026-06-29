@@ -135,6 +135,7 @@ const ptsOf = (cat) => (cat === "exact" ? GROUP_OUTCOME + GROUP_EXACT_BONUS : ca
 function computeAll(results, fixtures, participants, advanced) {
   const played = fixtures.filter((f) => results[f.id]); const remaining = fixtures.filter((f) => !results[f.id]);
   const _adv = buildAdvanced(results, fixtures, advanced);
+  const _bf = bonusFasit(results, fixtures);
   const rows = participants.map((p) => {
     let pts = 0, exact = 0, hits = 0, miss = 0, goals = 0, bold = 0, predicted = 0; const per = {};
     fixtures.forEach((f) => {
@@ -142,7 +143,7 @@ function computeAll(results, fixtures, participants, advanced) {
       const res = results[f.id]; const cat = catOf(pr, res); per[f.id] = cat;
       if (res && pr) { pts += ptsOf(cat); if (cat === "exact") { exact++; hits++; } else if (cat === "outcome") hits++; else miss++; }
     });
-    const ko = koPointsFor(p, _adv), bonus = p.bonus || 0, adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
+    const ko = koPointsFor(p, _adv), bonus = bonusPointsFor(p, _bf), adjust = p.adjust || 0, total = pts + ko + bonus + adjust;
     const playedPred = played.filter((f) => p.preds[f.id]).sort((a, b) => koTs(a) - koTs(b)).slice(-6);
     const form = playedPred.map((f) => per[f.id]); const settled = hits + miss; const hitRate = settled ? Math.round((100 * hits) / settled) : 0;
     const maxRemaining = remaining.filter((f) => p.preds[f.id]).length * MAXPER;
@@ -175,6 +176,16 @@ const _ESPN_ALIAS = { unitedstates: "usa", congodr: "drcongo", turkiye: "turkey"
 const _nzTeam = (s) => { const b = (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, ""); return _ESPN_ALIAS[b] || b; };
 const BONUS_Q = [{ l: "Golden Boot (toppscorer)", p: 20 }, { l: "Golden Ball (beste spiller)", p: 20 }, { l: "Flest mål scoret (gruppespill)", p: 10 }, { l: "Flest mål sluppet inn (gruppespill)", p: 10 }, { l: "Flest gule kort", p: 10 }];
 const BONUS_FASIT = [null, null, null, null, null];
+// Auto-fasit for de to gruppespill-bonusspoersmaalene: lag(ene) med flest scorede / flest innslupne maal
+// i gruppespillet. Ved uavgjort teller ALLE lag som deler foersteplassen (returneres som array).
+function bonusFasit(results, fixtures) {
+  const gf = {}, ga = {};
+  (fixtures || []).forEach((f) => { const r = results && results[f.id]; if (!r) return; gf[f.h] = (gf[f.h] || 0) + r[0]; ga[f.h] = (ga[f.h] || 0) + r[1]; gf[f.a] = (gf[f.a] || 0) + r[1]; ga[f.a] = (ga[f.a] || 0) + r[0]; });
+  const leaders = (m) => { let mx = -1; for (const k in m) if (m[k] > mx) mx = m[k]; return mx <= 0 ? null : Object.keys(m).filter((k) => m[k] === mx); };
+  return [BONUS_FASIT[0], BONUS_FASIT[1], leaders(gf), leaders(ga), BONUS_FASIT[4]];
+}
+function bonusOK(ans, fa) { if (!fa || !ans || ans === "\u2014") return false; const a = _nzTeam(ans); return (Array.isArray(fa) ? fa : [fa]).some((x) => _nzTeam(x) === a); }
+function bonusPointsFor(p, bf) { const tips = BONUS_TIPS[p.id] || []; let s = 0; for (let i = 0; i < BONUS_Q.length; i++) if (bonusOK(tips[i], bf[i])) s += BONUS_Q[i].p; return s; }
 const BONUS_TIPS = {"adrianeikenes":["Julian Alvarez (Argentina)","Lionel Messi (Argentina)","Spain","Curacao","Egypt"],"alexandergundersen":["Kylian Mbappé","Lamine Yamal","Spain","South Korea","Argentina"],"andersbjrnsen":["Kylian Mbappe","Lamine Yamal","Spain","Haiti","Argentina"],"antonmartinringen":["Lamine Yamal","Lamine Yamal","Spain","Curacao","Argentina"],"atle":["Kylian Mbappe (France)","Lamine Yamal (Spain)","Spain","Curacao","Argentina"],"brageboasson":["Kylian Mbappé","Lamine Yamal","Spain","Curacao","Argentina"],"frithjoffoss":["Kylian Mbappe (France)","Lamine Yamal (Spain)","Spain","Haiti","Argentina"],"glenntorestray":["Kylian Mbappé","Lamine Yamal","Spain","Curacao","Argentina"],"jacobalorsa":["—","—","—","—","—"],"joachimfreuchen":["Kylian Mbappe (France)","Lamine Yamal (Spain)","Brazil","Curacao","Argentina"],"mariusalfredsen":["Erling Haaland (Norway)","Bruno Fernandes (Portugal)","Spain","Cape Verde","Argentina"],"martinwold":["Julian Alvarez (Argentina)","Lionel Messi (Argentina)","Spain","Curacao","Egypt"],"minusinghbigom":["Erling Haaland (Norway)","Lionel Messi (Argentina)","Germany","Iraq","Argentina"],"monsknudtzon":["Erling Haaland (Norway)","Lamine Yamal (Spain)","Brazil","Haiti","Colombia"],"prebenklausen":["Kylian Mbappé","Lamine Yamal","Spain","South Korea","Argentina"],"palsaga":["Raphinha (Brazil)","Lionel Messi (Argentina)","Germany","Cape Verde","Bosnia & Herzegovina"],"albech":["Erling Haaland (Norway)","Kylian Mbappe (France)","Argentina","Curacao","Argentina"],"torgeirrstberg":["Bruno Fernandes (Portugal)","Bruno Fernandes (Portugal)","Germany","Haiti","Senegal"]};
 const KO_PTS = { r32: 2, r16: 5, qf: 8, sf: 12, final: 18 };
 // Et lag teller som "avansert til R32" KUN naar det er MATEMATISK garantert videre.
@@ -238,7 +249,7 @@ async function fetchAdvancement() {
     const real = (nm) => !!nm && !/Winner|Place|Round of|Group [A-L]|TBD|Third/i.test(nm);
     const nm = (cp) => ((cp.team || {}).displayName || "");
     const ko = (j.events || []).filter((e) => (e.season || {}).type === 13801).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-    ko.forEach((e, idx) => { const c = (e.competitions || [])[0]; if (!c) return; const cs = c.competitors || []; if (cs.length < 2) return; const bucket = idx < 16 ? r32 : idx < 24 ? r16 : idx < 28 ? qf : idx < 30 ? sf : null; if (!bucket) return; cs.forEach((cp) => { if (real(nm(cp))) bucket.add(_nzTeam(nm(cp))); }); });
+    ko.forEach((e, idx) => { const c = (e.competitions || [])[0]; if (!c) return; const cs = c.competitors || []; if (cs.length < 2) return; const bucket = idx < 16 ? r32 : idx < 24 ? r16 : idx < 28 ? qf : idx < 30 ? sf : null; if (bucket) cs.forEach((cp) => { if (real(nm(cp))) bucket.add(_nzTeam(nm(cp))); }); const stt = (c.status || {}).type || {}; if (stt.completed || stt.state === "post") { let w = cs.find((x) => x.winner === true); if (!w) { const ha = parseInt(cs[0].score, 10), ab = parseInt(cs[1].score, 10); if (Number.isFinite(ha) && Number.isFinite(ab) && ha !== ab) w = ha > ab ? cs[0] : cs[1]; } const nxt = idx < 16 ? r16 : idx < 24 ? qf : idx < 28 ? sf : idx < 30 ? fin : null; if (w && nxt && real(nm(w))) nxt.add(_nzTeam(nm(w))); } });
     const f = ko[31];
     if (f) { const c = (f.competitions || [])[0]; const cs = (c && c.competitors) || []; if (cs.length === 2 && real(nm(cs[0])) && real(nm(cs[1]))) { fin.add(_nzTeam(nm(cs[0]))); fin.add(_nzTeam(nm(cs[1]))); const st = (c.status || {}).type || {}; if (st.completed || st.state === "post") { const w = cs.find((x) => x.winner === true); if (w) win.add(_nzTeam(nm(w))); } } }
   } catch (e) {}
@@ -696,7 +707,7 @@ function Picker({ val, set, rows, photos }) { const r = rows.find((x) => x.p.id 
 function Cat({ label, v, max }) { const pct = Math.min(100, Math.round(100 * (v || 0) / Math.max(1, max))); return <div className="card rounded-lg p-2 border hair text-center"><div className="text-[10px] muted truncate">{label}</div><div className="font-extrabold text-emerald-500 leading-tight">{v || 0}</div><div className="text-[9px] muted">av {max}</div><div className="h-1 mt-1 rounded-full trackbg overflow-hidden"><div className="h-full bg-emerald-500" style={{ width: pct + "%" }} /></div></div>; }
 function KoRow({ label, pts, teams, advSet }) { const A = advSet || []; return <div className="flex items-start gap-2 text-xs py-1 border-b hair last:border-0"><span className="w-24 shrink-0 muted">{label} <span className="text-[10px]">({pts}p)</span></span><div className="flex-1 flex flex-wrap gap-1">{teams && teams.length ? teams.map((t, i) => { const ok = A.includes(_nzTeam(t)); return <span key={i} className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${ok ? "bg-emerald-500 text-white" : "softbg"}`}>{t}{ok ? " ✓" : ""}</span>; }) : <span className="muted">—</span>}</div></div>; }
 function DeltakerDetalj({ row, ds, photos }) {
-  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null; const adv = buildAdvanced(ds.results, ds.fixtures, ds.advanced);
+  const p = row.p; const ko = p.ko || {}; const winner = (ko.winner && ko.winner[0]) || p.winner || null; const adv = buildAdvanced(ds.results, ds.fixtures, ds.advanced); const _bf = bonusFasit(ds.results, ds.fixtures);
   const spark = (ds.history || []).map((h, i) => ({ x: i, y: h.pts[p.id] ?? 0 }));
   const chron = (a, b) => koTs(a) - koTs(b) || a.idx - b.idx;
   const played = ds.fixtures.filter((f) => ds.results[f.id]).sort(chron);
@@ -716,7 +727,7 @@ function DeltakerDetalj({ row, ds, photos }) {
       <KoRow label="Kvartfinale" pts={8} teams={(ko.qf || []).slice(0, 8)} advSet={adv.qf} />
       <KoRow label="8-delsfinale" pts={5} teams={(ko.r16 || []).slice(0, 16)} advSet={adv.r16} />
       <KoRow label="16-delsfinale" pts={2} teams={(ko.r32 || []).slice(0, 32)} advSet={adv.r32} />
-      <div className="border-t hair mt-2 pt-2"><div className="text-[11px] font-semibold muted mb-1">Bonus (maks {BONUS_MAX}) – avgjøres mot slutten</div>{BONUS_Q.map((q, i) => { const ans = (BONUS_TIPS[p.id] || [])[i]; const fa = BONUS_FASIT[i]; const ok = !!(fa && ans && ans !== "—" && String(ans).trim().toLowerCase() === String(fa).trim().toLowerCase()); return <div key={i} className="flex items-center gap-2 text-[11px] py-0.5"><span className="muted flex-1 min-w-0">{q.l} <span className="text-[10px]">({q.p}p)</span></span><span className={`shrink-0 font-medium px-1.5 py-0.5 rounded ${ok ? "bg-emerald-500 text-white" : "softbg"}`}>{ans && ans !== "—" ? ans : "—"}{ok ? " ✓" : ""}</span></div>; })}</div>
+      <div className="border-t hair mt-2 pt-2"><div className="text-[11px] font-semibold muted mb-1">Bonus (maks {BONUS_MAX})</div>{BONUS_Q.map((q, i) => { const ans = (BONUS_TIPS[p.id] || [])[i]; const ok = bonusOK(ans, _bf[i]); return <div key={i} className="flex items-center gap-2 text-[11px] py-0.5"><span className="muted flex-1 min-w-0">{q.l} <span className="text-[10px]">({q.p}p)</span></span><span className={`shrink-0 font-medium px-1.5 py-0.5 rounded ${ok ? "bg-emerald-500 text-white" : "softbg"}`}>{ans && ans !== "—" ? ans : "—"}{ok ? " ✓" : ""}</span></div>; })}</div>
     </div>
     <div className="text-xs font-semibold muted mb-1 flex items-center gap-1.5"><Lock size={12} /> Kamptips ({row.predicted}) – tips, resultat og poeng</div>
     <div className="flex items-center gap-3 text-[10px] muted mb-2"><span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500" /> eksakt 4p</span><span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400" /> utfall 2p</span><span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-rose-400" /> bom 0p</span></div>
